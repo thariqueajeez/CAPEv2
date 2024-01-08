@@ -9,7 +9,7 @@ import shutil
 import signal
 import subprocess
 from typing import DefaultDict, List, Optional, Set, Union
-
+import re
 import pebble
 
 from lib.cuckoo.common.config import Config
@@ -158,46 +158,7 @@ def static_file_info(
         log.info("Missed dependencies: pip3 install oletools")
 
     options_dict = get_options(options)
-
-    if HAVE_PEFILE and ("PE32" in data_dictionary["type"] or "MS-DOS executable" in data_dictionary["type"]):
-        data_dictionary["pe"] = PortableExecutable(file_path).run(task_id)
-
-        if HAVE_FLARE_CAPA:
-            capa_details = flare_capa_details(file_path, "static")
-            if capa_details:
-                data_dictionary["flare_capa"] = capa_details
-
-        if HAVE_FLOSS:
-            floss_strings = Floss(file_path, "static", "pe").run()
-            if floss_strings:
-                data_dictionary["floss"] = floss_strings
-
-        if "Mono" in data_dictionary["type"]:
-            if selfextract_conf.general.dotnet:
-                data_dictionary["dotnet"] = DotNETExecutable(file_path).run()
-                if processing_conf.strings.dotnet:
-                    dotnet_strings = dotnet_user_strings(file_path)
-                    if dotnet_strings:
-                        data_dictionary.setdefault("dotnet_strings", dotnet_strings)
-
-    elif HAVE_OLETOOLS and package in {"doc", "ppt", "xls", "pub"} and selfextract_conf.general.office:
-        # options is dict where we need to get pass get_options
-        data_dictionary["office"] = Office(file_path, task_id, data_dictionary["sha256"], options_dict).run()
-    elif ("PDF" in data_dictionary["type"] or file_path.endswith(".pdf")) and selfextract_conf.general.pdf:
-        data_dictionary["pdf"] = PDF(file_path).run()
-    elif (
-        package in {"wsf", "hta"} or data_dictionary["type"] == "XML document text" or file_path.endswith(".wsf")
-    ) and selfextract_conf.general.windows_script:
-        data_dictionary["wsf"] = WindowsScriptFile(file_path).run()
-    # elif package in {"js", "vbs"}:
-    #    data_dictionary["js"] = EncodedScriptFile(file_path).run()
-    elif (package == "lnk" or "MS Windows shortcut" in data_dictionary["type"]) and selfextract_conf.general.lnk:
-        data_dictionary["lnk"] = LnkShortcut(file_path).run()
-    elif ("Java Jar" in data_dictionary["type"] or file_path.endswith(".jar")) and selfextract_conf.general.java:
-        if selfextract_conf.procyon.binary and not path_exists(selfextract_conf.procyon.binary):
-            log.error("procyon_path specified in processing.conf but the file does not exist")
-        else:
-            data_dictionary["java"] = Java(file_path, selfextract_conf.procyon.binary).run()
+    static_extract(data_dictionary, file_path, task_id, package, options_dict)
 
     # It's possible to fool libmagic into thinking our 2007+ file is a zip.
     # So until we have static analysis for zip files, we can use oleid to fail us out silently,
@@ -250,7 +211,49 @@ def static_file_info(
         options_dict,
         results,
         duplicated,
+        task_id = task_id
     )
+
+def static_extract(data_dictionary, file_path, task_id, package, options_dict):
+    if HAVE_PEFILE and ("PE32" in data_dictionary["type"] or "MS-DOS executable" in data_dictionary["type"]):
+        data_dictionary["pe"] = PortableExecutable(file_path).run(task_id)
+
+        if HAVE_FLARE_CAPA:
+            capa_details = flare_capa_details(file_path, "static")
+            if capa_details:
+                data_dictionary["flare_capa"] = capa_details
+
+        if HAVE_FLOSS:
+            floss_strings = Floss(file_path, "static", "pe").run()
+            if floss_strings:
+                data_dictionary["floss"] = floss_strings
+
+        if "Mono" in data_dictionary["type"]:
+            if selfextract_conf.general.dotnet:
+                data_dictionary["dotnet"] = DotNETExecutable(file_path).run()
+                if processing_conf.strings.dotnet:
+                    dotnet_strings = dotnet_user_strings(file_path)
+                    if dotnet_strings:
+                        data_dictionary.setdefault("dotnet_strings", dotnet_strings)
+
+    elif HAVE_OLETOOLS and package in {"doc", "ppt", "xls", "pub"} and selfextract_conf.general.office:
+        # options is dict where we need to get pass get_options
+        data_dictionary["office"] = Office(file_path, task_id, data_dictionary["sha256"], options_dict).run()
+    elif ("PDF" in data_dictionary["type"] or file_path.endswith(".pdf")) and selfextract_conf.general.pdf:
+        data_dictionary["pdf"] = PDF(file_path).run()
+    elif (
+        package in {"wsf", "hta"} or data_dictionary["type"] == "XML document text" or file_path.endswith(".wsf")
+    ) and selfextract_conf.general.windows_script:
+        data_dictionary["wsf"] = WindowsScriptFile(file_path).run()
+    # elif package in {"js", "vbs"}:
+    #    data_dictionary["js"] = EncodedScriptFile(file_path).run()
+    elif (package == "lnk" or "MS Windows shortcut" in data_dictionary["type"]) and selfextract_conf.general.lnk:
+        data_dictionary["lnk"] = LnkShortcut(file_path).run()
+    elif ("Java Jar" in data_dictionary["type"] or file_path.endswith(".jar")) and selfextract_conf.general.java:
+        if selfextract_conf.procyon.binary and not path_exists(selfextract_conf.procyon.binary):
+            log.error("procyon_path specified in processing.conf but the file does not exist")
+        else:
+            data_dictionary["java"] = Java(file_path, selfextract_conf.procyon.binary).run()
 
 
 def detect_it_easy_info(file_path: str):
@@ -266,19 +269,12 @@ def detect_it_easy_info(file_path: str):
         if "detects" not in output:
             return []
 
-        if "Invalid signature" in output and "{" in output:
-            start = output.find("{")
-            if start != -1:
-                output = output[start:]
-
         strings = [sub["string"] for block in json.loads(output).get("detects", []) for sub in block.get("values", [])]
 
         if strings:
             return strings
-    except json.decoder.JSONDecodeError as e:
-        log.debug("DIE results are not in json format: %s", str(e))
     except Exception as e:
-        log.error("DIE error: %s", str(e))
+        log.error("Trid error: %s", str(e))
     return []
 
 
@@ -307,6 +303,7 @@ def _extracted_files_metadata(
     files: List[str],
     duplicated: Optional[DuplicatesType] = None,
     results: Optional[dict] = None,
+    task_id: str = None
 ) -> List[dict]:
     """
     args:
@@ -365,6 +362,9 @@ def _extracted_files_metadata(
                     file=f,
                 )
             file_info["data"] = is_text_file(file_info, destination_folder, processing_conf.CAPE.buffer)
+            package = choose_package(file_info["type"], file_info["name"], '', dest_path)
+            log.debug(results)
+            static_extract(file_info, file_info["path"], str(task_id+''+file_info["name"]), package, '')
             metadata.append(file_info)
 
     return metadata
@@ -398,6 +398,7 @@ def generic_file_extractors(
     results: dict,
     duplicated: DuplicatesType,
     tests: bool = False,
+    task_id: str = None
 ):
     """
     file - path to binary
@@ -408,7 +409,7 @@ def generic_file_extractors(
 
     Run all extra extractors/unpackers/extra scripts here, each extractor should check file header/type/identification:
     """
-
+    log.debug(str(task_id))
     if not path_exists(destination_folder):
         path_mkdir(destination_folder)
 
@@ -498,8 +499,9 @@ def generic_file_extractors(
             if old_tool_name:
                 log.debug("Files already extracted from %s by %s. Also extracted with %s", file, old_tool_name, new_tool_name)
                 continue
+            log.debug(task_id)
             metadata = _extracted_files_metadata(
-                tempdir, destination_folder, files=extracted_files, duplicated=duplicated, results=results
+                tempdir, destination_folder, files=extracted_files, duplicated=duplicated, results=results, task_id=task_id
             )
             data_dictionary.update(
                 {
@@ -947,3 +949,144 @@ def msix_extract(file: str, *, data_dictionary: dict, **_) -> ExtractorReturnTyp
         ctx["extracted_files"] = collect_extracted_filenames(tempdir)
 
     return ctx
+
+def choose_package(file_type, file_name, exports, target):
+        """Choose analysis package due to file type and file extension.
+        @param file_type: file type.
+        @param file_name: file name.
+        @return: package name or None.
+        """
+        if not file_type:
+            return None
+
+        file_name = file_name.lower()
+        file_content = open(target, "rb").read()
+
+        if "Nullsoft Installer" in file_type:
+            return "nsis"
+        elif "DLL" in file_type:
+            if file_name.endswith(".cpl"):
+                return "cpl"
+            elif file_name.endswith(".xll"):
+                return "xls"
+            else:
+                if exports:
+                    explist = exports.split(",")
+                    if "DllRegisterServer" in explist:
+                        return "regsvr"
+                return "dll"
+        elif "PE32" in file_type or "MS-DOS" in file_type:
+            return "exe"
+        elif file_name.endswith((".msi", ".msp", ".appx")) or "MSI Installer" in file_type:
+            return "msi"
+        elif file_name.endswith(".pub"):
+            return "pub"
+        elif file_name.endswith(".one"):
+            return "one"
+        elif (
+            "Rich Text Format" in file_type
+            or "Microsoft Word" in file_type
+            or "Microsoft Office Word" in file_type
+            or "Microsoft OOXML" in file_type
+            or "MIME entity" in file_type
+            or file_name.endswith((".doc", ".dot", ".docx", ".dotx", ".docm", ".dotm", ".docb", ".rtf", ".mht", ".mso", ".wbk", ".wiz"))
+        ):
+            return "doc"
+        elif (
+            "Microsoft Office Excel" in file_type
+            or "Microsoft Excel" in file_type
+            or file_name.endswith(
+                (".xls", ".xlt", ".xlm", ".xlsx", ".xltx", ".xlsm", ".xltm", ".xlsb", ".xla", ".xlam", ".xll", ".xlw", ".slk", ".csv")
+            )
+        ):
+            return "xls"
+        elif "PowerPoint" in file_type or file_name.endswith(
+            (".ppt", ".ppa", ".pot", ".pps", ".pptx", ".pptm", ".potx", ".potm", ".ppam", ".ppsx", ".ppsm", ".sldx", ".sldm")
+        ):
+            return "ppt"
+        elif b"MANIFEST" in file_content or "Java Jar" in file_type or "Java archive" in file_type or file_name.endswith(".jar"):
+            return "jar"
+        elif "Zip" in file_type:
+            return "zip"
+        elif "RAR archive" in file_type or file_name.endswith(".rar"):
+            return "rar"
+        elif "Macromedia Flash" in file_type or file_name.endswith((".swf", ".fws")):
+            return "swf"
+        elif file_name.endswith((".py", ".pyc")) or "Python script" in file_type:
+            return "python"
+        elif file_name.endswith(".ps1"):
+            return "ps1"
+        elif file_name.endswith((".msg", ".rpmsg")) or "rpmsg Restricted Permission Message" in file_type:
+            return "msg"
+        elif file_name.endswith((".eml", ".ics")) or (
+            "RFC 822 mail" in file_type
+            or "old news" in file_type
+            or "mail forwarding" in file_type
+            or "smtp mail" in file_type
+            or "news" in file_type
+            or "news or mail" in file_type
+            or "saved news" in file_type
+            or "MIME entity" in file_type
+            or "vCalendar calendar" in file_type
+        ):
+            return "eml"
+        elif file_name.endswith((".js", ".jse")):
+            return "js"
+        elif file_name.endswith(".hta"):
+            return "hta"
+        elif file_name.endswith(".xps"):
+            return "xps"
+        elif "HTML" in file_type:
+            if file_name.endswith(".wsf") or file_name.endswith(".wsc"):
+                return "wsf"
+            elif re.search(b'(?:<hta\\:application|<script\\s+language\\s*=\\s*"(J|VB|Perl)Script")', file_content, re.I):
+                return "html"
+            else:
+                return "chrome"
+        elif file_name.endswith(".mht"):
+            return "mht"
+        elif file_name.endswith(".url") or "MS Windows 95 Internet shortcut" in file_type or "Windows URL shortcut" in file_type:
+            return "html"
+        elif b"mso-application" in file_content and b"Word.Document" in file_content:
+            return "doc"
+        elif file_name.endswith(".lnk") or "MS Windows shortcut" in file_type:
+            return "lnk"
+        elif file_name.endswith(".chm") or "MS Windows HtmlHelp Data" in file_type:
+            return "chm"
+        elif file_name.endswith((".hwp", ".hwpx", ".hwt", ".hml")) or "Hangul (Korean) Word Processor File" in file_type:
+            return "hwp"
+        elif file_name.endswith((".inp", ".int")) or b"InPage Arabic Document" in file_content:
+            return "inp"
+        elif file_name.endswith((".xsl", ".xslt")) or "XSL stylesheet" in file_type:
+            return "xslt"
+        elif file_name.endswith(".sct"):
+            if re.search(rb"(?is)<\?XML.*?<scriptlet.*?<registration", file_content):
+                return "sct"
+            else:
+                return "hta"
+        elif file_name.endswith(".wsf") or file_type == "XML document text":
+            return "wsf"
+        elif "PDF" in file_type or file_name.endswith(".pdf"):
+            return "pdf"
+        elif re.search(b'<script\\s+language="(J|VB|Perl)Script"', file_content, re.I):
+            return "wsf"
+        elif (
+            file_name.endswith((".vbs", ".vbe"))
+            or re.findall(rb"\s?Dim\s", file_content, re.I)
+            or re.findall(b"\s?\x00D\x00i\x00m\x00\s", file_content, re.I)
+        ):
+            return "vbs"
+        elif b"Set-StrictMode" in file_content[:100]:
+            return "ps1"
+        elif file_name.endswith((".csproj", ".vbproj", ".vcxproj", ".dbproj", "fsproj")) or b"msbuild" in file_content:
+            return "msbuild"
+        elif file_name.endswith((".jtd", ".jtdc", ".jttc", ".jtt")):
+            return "ichitaro"
+        elif file_name.endswith(".reg"):
+            return "reg"
+        elif "ISO 9660" in file_type or file_name.endswith((".iso", ".udf", ".vhd")):
+            return "archive"
+        elif file_name.endswith(".a3x"):
+            return "autoit"
+        else:
+            return "generic"

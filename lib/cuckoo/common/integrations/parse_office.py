@@ -16,6 +16,8 @@ from lib.cuckoo.common.constants import CUCKOO_ROOT
 from lib.cuckoo.common.objects import File
 from lib.cuckoo.common.path_utils import path_exists, path_mkdir, path_read_file, path_write_file
 from lib.cuckoo.common.utils import convert_to_printable
+from zipfile import is_zipfile
+
 
 try:
     import olefile
@@ -34,6 +36,10 @@ try:
     from oletools.oleid import OleID
     from oletools.olevba import UnexpectedDataError, VBA_Parser, detect_autoexec, detect_hex_strings, detect_suspicious, filter_vba
     from oletools.rtfobj import RtfObjParser, is_rtf
+    from oletools.oleobj import find_external_relationships
+    from oletools.oleobj import find_ole
+    from oletools.ooxml import XmlParser
+
 
     # disable this noisy logging
     old_enable_logging = oletools.olevba.enable_logging
@@ -262,6 +268,16 @@ class Office:
             try:
                 with olefile.OleFileIO(filepath) as ole:
                     meta = ole.get_metadata()
+                    for stream in ole.listdir():
+                        if stream[-1] != "\x01Ole10Native":
+                            continue
+                        content = ole.openstream(stream).read()
+                        stream = oletools.oleobj.OleNativeStream(content)
+                        self.push_blob(stream.data, "binaries", None, {
+                            "filename": stream.filename.decode("latin-1"),
+                            "src_path": stream.src_path.decode("latin-1"),
+                            "temp_path": stream.temp_path.decode("latin-1"),
+                    })
                     # must be left this way or we won't see the results
                     officeresults["Metadata"] = self._get_meta(meta)
             except AttributeError as e:
@@ -335,7 +351,41 @@ class Office:
             if tmp_xlmmacro:
                 officeresults["XLMMacroDeobfuscator"] = tmp_xlmmacro
 
+        try:
+            self.xml_parser = XmlParser(filepath)
+            self.filepath = filepath
+            oleobj = list(self.oleobj())
+            olebinNames = self.getOleObjectNames()
+        except:
+            oleobj = list()
+            olebinNames = list()
+        officeresults["Metadata"]["oleobj"] = oleobj
+        officeresults["Metadata"]["olebinNames"] = olebinNames
+        log.debug(officeresults)
         return officeresults
+    
+    def getOleObjectNames(self):
+        ole_list = []
+        for ole in find_ole(self.filepath, None, self.xml_parser):
+            if ole is None:    # no ole file found
+                continue
+            for path_parts in ole.listdir():
+                if path_parts[-1].lower() == '\x01ole10native':
+                    ole_list.append(path_parts[-1])      
+        return ole_list
+    
+    def oleobj(self):
+        if is_zipfile(self.filepath):
+            for relationship, target in find_external_relationships(self.xml_parser):
+                msg = "None"
+                if target.startswith('mhtml:'):
+                    msg = "Potential exploit for CVE-2021-40444"
+                yield {
+                    "relationship": relationship,
+                    "target": target,
+                    "msg": msg,
+                }
+    
 
     def run(self) -> Dict[str, Any]:
         """Run analysis.

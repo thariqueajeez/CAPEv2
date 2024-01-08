@@ -19,11 +19,12 @@ import os
 import timeit
 from contextlib import suppress
 from pathlib import Path
+import re
 
 from lib.cuckoo.common.abstracts import Processing
 from lib.cuckoo.common.cape_utils import cape_name_from_yara, is_duplicated_binary, pe_map, static_config_parsers
 from lib.cuckoo.common.config import Config
-from lib.cuckoo.common.integrations.file_extra_info import DuplicatesType, static_file_info
+from lib.cuckoo.common.integrations.file_extra_info import DuplicatesType, static_file_info, choose_package
 from lib.cuckoo.common.objects import File
 from lib.cuckoo.common.path_utils import path_exists
 from lib.cuckoo.common.replace_patterns_utils import _clean_path
@@ -191,13 +192,13 @@ class CAPE(Processing):
             clamav_detection = get_clamav_consensus(file_info["clamav"])
             if clamav_detection:
                 add_family_detection(self.results, clamav_detection, "ClamAV", file_info["sha256"])
-
         # should we use dropped path here?
+        package = choose_package(file_info["type"], file_info["name"], '', self.task["target"])
         static_file_info(
             file_info,
             file_path,
             str(self.task["id"]),
-            self.task.get("package", ""),
+            package,
             self.task.get("options", ""),
             self.self_extracted,
             self.results,
@@ -421,3 +422,4 @@ class CAPE(Processing):
         }
         for config in self.cape["configs"]:
             config["_associated_analysis_hashes"] = associated_analysis_hashes
+    
